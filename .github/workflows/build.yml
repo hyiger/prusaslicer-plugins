@@ -1,0 +1,182 @@
+name: build
+
+# The bundle format is reproduced with coreutils and openssl rather than by
+# calling `PrusaSlicer plugin sign`, which needs the application binary and is
+# not available to CI. Verified byte-compatible against a bundle signed by
+# PrusaSlicer 3.0.0-alpha11: manifest.txt is "<sha256>  <name>\n" per payload
+# file, and manifest.sign is a PKCS#1 v1.5 RSA-SHA256 signature over those
+# bytes. Ordering is irrelevant to the verifier -- it signs whatever bytes
+# manifest.txt holds and checks each listed file -- so entries are sorted here
+# for reproducibility, where PrusaSlicer emits filesystem order.
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  BUNDLE: com.hyiger.slicer.calibration
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Lua
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq lua5.4
+
+      # The suites run against a stub of the plugin sandbox, so they need no
+      # PrusaSlicer install. run_all.sh exits non-zero if any suite fails.
+      - name: Run test suites
+        run: |
+          sudo ln -sf "$(command -v lua5.4)" /usr/local/bin/lua
+          sh test/run_all.sh
+
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      signed: ${{ steps.sign.outputs.signed }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate manifest and read version
+        id: meta
+        run: |
+          cd "$BUNDLE"
+          for field in id name license min_slicer_version version author required_apis; do
+            jq -e --arg f "$field" 'has($f)' manifest.json >/dev/null \
+              || { echo "::error::manifest.json is missing required field '$field'"; exit 1; }
+          done
+          id=$(jq -r .id manifest.json)
+          [ "$id" = "$BUNDLE" ] \
+            || { echo "::error::manifest id '$id' does not match directory '$BUNDLE'"; exit 1; }
+          version=$(jq -r .version manifest.json)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "manifest.json valid, version $version"
+
+      # A tag that disagrees with the manifest would ship a bundle whose
+      # internal version contradicts its release. Catch it before publishing.
+      - name: Check tag matches manifest version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          if [ "$tag" != "${{ steps.meta.outputs.version }}" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match manifest version ${{ steps.meta.outputs.version }}"
+            exit 1
+          fi
+
+      - name: Build checksum file
+        run: |
+          cd "$BUNDLE"
+          rm -f manifest.txt manifest.sign
+          ls | grep -vE '^manifest\.(txt|sign)$' | LC_ALL=C sort \
+            | xargs sha256sum > manifest.txt
+          cat manifest.txt
+
+      # Forks and pull requests have no access to secrets, so they produce an
+      # unsigned bundle. That still installs by unpacking into <data_dir>/lua --
+      # PluginRegistry::scan() does not verify signatures -- but it cannot be
+      # imported from the Plugins menu, which does.
+      - name: Sign bundle
+        id: sign
+        env:
+          SIGNING_KEY: ${{ secrets.PLUGIN_SIGNING_KEY }}
+        run: |
+          if [ -z "$SIGNING_KEY" ]; then
+            echo "::warning::PLUGIN_SIGNING_KEY is not set - building an UNSIGNED bundle"
+            echo "signed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          umask 077
+          printf '%s\n' "$SIGNING_KEY" > /tmp/signing.pem
+          openssl dgst -sha256 -sign /tmp/signing.pem \
+            -out "$BUNDLE/manifest.sign" "$BUNDLE/manifest.txt"
+          shred -u /tmp/signing.pem 2>/dev/null || rm -f /tmp/signing.pem
+          echo "signed=true" >> "$GITHUB_OUTPUT"
+
+      # Verify against the public key committed to the repo. This catches a
+      # signing secret that has drifted from the key recipients already trust,
+      # which would otherwise only surface as a failed install on their machine.
+      - name: Verify signature against the published public key
+        if: steps.sign.outputs.signed == 'true'
+        run: |
+          openssl dgst -sha256 -verify keys/hyiger.pem \
+            -signature "$BUNDLE/manifest.sign" "$BUNDLE/manifest.txt"
+          cd "$BUNDLE" && sha256sum -c manifest.txt
+
+      - name: Create zip
+        run: |
+          cd "$BUNDLE"
+          # -X drops extra file attributes, matching the 0-byte extra fields in
+          # a bundle written by PrusaSlicer's own miniz writer.
+          zip -qX "../$BUNDLE.zip" manifest.txt manifest.json *.lua
+          # Not `[ -f ... ] && zip ...`: the default shell is `bash -e`, so a
+          # false test as the last command would fail the step on unsigned builds.
+          if [ -f manifest.sign ]; then
+            zip -qX "../$BUNDLE.zip" manifest.sign
+          fi
+          cd ..
+          unzip -Z1 "$BUNDLE.zip"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.BUNDLE }}-${{ steps.meta.outputs.version }}${{ steps.sign.outputs.signed == 'true' && '' || '-unsigned' }}
+          path: |
+            ${{ env.BUNDLE }}.zip
+            keys/hyiger.pem
+            INSTALL.md
+          if-no-files-found: error
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: ${{ env.BUNDLE }}-*
+          merge-multiple: true
+
+      - name: Refuse to publish an unsigned release
+        if: needs.build.outputs.signed != 'true'
+        run: |
+          echo "::error::PLUGIN_SIGNING_KEY is not configured, so this build is unsigned."
+          echo "A tagged release must be signed or recipients cannot import it."
+          exit 1
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cat > notes.md <<'NOTES'
+          Signed plugin bundle for PrusaSlicer 3.0.
+
+          **Install:** copy `hyiger.pem` into `<config folder>/authorized_authors/`
+          (Help → Show Configuration Folder), restart, then install the zip from
+          the Plugins menu and run Plugins → Rescan.
+
+          There is no in-app way to add the key, so that first step cannot be
+          skipped. See INSTALL.md for the no-key alternative and troubleshooting.
+
+          Verify by hand:
+
+              unzip -o com.hyiger.slicer.calibration.zip -d bundle
+              openssl dgst -sha256 -verify hyiger.pem \
+                -signature bundle/manifest.sign bundle/manifest.txt
+          NOTES
+          gh release create "$GITHUB_REF_NAME" \
+            "$BUNDLE.zip" keys/hyiger.pem \
+            --title "$GITHUB_REF_NAME" \
+            --notes-file notes.md
