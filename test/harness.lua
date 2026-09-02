@@ -73,7 +73,7 @@ function api.project:add_object(def)
   L[#L+1] = {add_object = vols}
 end
 
-function reset(notes, layer_height)
+function reset(notes, layer_height, model)
   L = {}
   PRINT = new_box("print", {
     layer_height             = {t="double", v=layer_height or 0.2},
@@ -101,7 +101,8 @@ function reset(notes, layer_height)
   })
   PRINTER = new_box("printer", {
     printer_notes = {t="string", v=notes or ""},
-    gcode_flavor  = {enum=true},
+    printer_model = {t="string", v=model or ""},
+    gcode_flavor  = {enum=true},   -- reads throw: EnumWrapper is not in ExposedConfigValue
   })
   return L
 end

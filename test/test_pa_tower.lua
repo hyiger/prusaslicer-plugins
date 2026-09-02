@@ -45,8 +45,8 @@ local function opts(over)
 end
 
 -- Collect a run into something assertable.
-local function run(notes, layer_height, over)
-    reset(notes, layer_height)
+local function run(notes, layer_height, over, model)
+    reset(notes, layer_height, model)
     execute(opts(over))
     local r = {sets = {}, dropped = {}, missing = {}, gcodes = {}, volumes = nil}
     for _, e in ipairs(getlog()) do
@@ -206,6 +206,25 @@ do
         check("custom G-code calls were made", last_gcode_at ~= nil, true)
     end
 end
+
+-- ------------------------------------------- printer_model fallback --------
+-- Regression: a Core One INDX exports printer_notes EMPTY and
+-- printer_model = COREONE_INDX4T, with gcode_flavor = reprap. Notes-only
+-- detection fell through to M900 K, which Buddy firmware ignores -- the tower
+-- printed and calibrated nothing. gcode_flavor cannot be read from Lua at all,
+-- so printer_model is the only signal left.
+check("Core One INDX detected from printer_model",
+      prefix_of(run("", 0.2, nil, "COREONE_INDX4T")), "M572 S")
+check("notes still win when both are present",
+      prefix_of(run("PRINTER_MODEL_MK4IS", 0.2, nil, "SOMETHING_ELSE")), "M572 S")
+check("model marker matches with an underscore suffix",
+      prefix_of(run("", 0.2, nil, "MK4S_HT90")), "M572 S")
+check("Klipper detected from model too",
+      prefix_of(run("", 0.2, nil, "Klipper Voron")), "SET_PRESSURE_ADVANCE ADVANCE=")
+check("both empty still falls back to M900",
+      prefix_of(run("", 0.2, nil, "")), "M900 K")
+check("an unknown model falls back to M900",
+      prefix_of(run("", 0.2, nil, "ENDER3")), "M900 K")
 
 print(string.format("\n%d passed, %d failed", pass, fail))
 os.exit(fail == 0 and 0 or 1)

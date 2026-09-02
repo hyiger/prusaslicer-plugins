@@ -59,11 +59,22 @@ local DEFAULT_START, DEFAULT_END, DEFAULT_STEP = 0.0, 0.1, 0.005
 local DEFAULT_SPEED = 100.0
 local MAX_LEVELS = 100   -- a mistyped step must not produce a 600 mm tower
 
--- printer_notes markers that mean "Prusa Buddy input-shaper firmware", which
--- takes M572 S rather than M900 K. These are the same markers Prusa's own
--- start_filament_gcode switches on. The printer MODEL name is not usable here:
--- the MK3.9 carries PRINTER_MODEL_MK4IS in its notes, not "MK3.9". Generic
--- Marlin printers carry none of these and correctly fall through to M900.
+-- Markers meaning "this printer takes M572 S rather than M900 K". These are
+-- the ones Prusa's own start_filament_gcode switches on.
+--
+-- Searched in printer_notes FIRST, because it is what the fork keys off and is
+-- the more reliable of the two: the MK3.9 carries PRINTER_MODEL_MK4IS in its
+-- notes rather than "MK3.9". But printer_notes is empty on some profiles -- the
+-- Core One INDX is one -- and falling through to M900 there produces a tower
+-- whose commands the firmware ignores, which looks like a printed calibration
+-- and calibrates nothing. So printer_model is searched as a fallback; on that
+-- printer it reads COREONE_INDX4T, which carries the COREONE marker.
+--
+-- The fork gets this case from a rule unavailable here: any non-Marlin
+-- gcode_flavor (this printer reports reprap) takes M572. gcode_flavor is an
+-- EnumWrapper and ConfigBox:value() throws on enums, so it cannot be read from
+-- Lua at all. The pa_command parameter is the escape hatch when both string
+-- fields come up empty.
 local M572_MARKERS = {"MK4IS", "XLIS", "MK4S", "MK3.9S", "MK3.5", "MINIIS", "COREONE"}
 
 -- ConfigBox:value() throws if the key is absent from that preset box, so every
@@ -106,23 +117,24 @@ local function pa_command_prefix(bed, override)
         print("pa_tower: unknown pa_command '" .. override .. "', falling back to auto")
     end
 
-    local notes = read_config(bed:printer_presets(), "printer_notes")
-    if type(notes) ~= "string" then
-        notes = ""
-    end
-    notes = string.upper(notes)
-
-    -- Lua patterns have no alternation, so match the markers one at a time.
+    local printer_cfg = bed:printer_presets()
+    -- Lua patterns have no alternation, so markers are matched one at a time.
     -- Plain find (4th arg true) keeps the "." in MK3.9S literal.
-    if string.find(notes, "KLIPPER", 1, true) then
-        return "SET_PRESSURE_ADVANCE ADVANCE="
-    end
-    for _, marker in ipairs(M572_MARKERS) do
-        if string.find(notes, marker, 1, true) then
-            return "M572 S"
+    for _, source in ipairs({"printer_notes", "printer_model"}) do
+        local value = read_config(printer_cfg, source)
+        if type(value) == "string" and value ~= "" then
+            value = string.upper(value)
+            if string.find(value, "KLIPPER", 1, true) then
+                return "SET_PRESSURE_ADVANCE ADVANCE=", source
+            end
+            for _, marker in ipairs(M572_MARKERS) do
+                if string.find(value, marker, 1, true) then
+                    return "M572 S", source
+                end
+            end
         end
     end
-    return "M900 K"
+    return "M900 K", "default"
 end
 
 -- One chevron arm: a bar running along +X, centred on Y so that a Z rotation
@@ -223,7 +235,7 @@ function execute(opts)
 
     -- Resolve the firmware command before touching anything: a bad override
     -- must not leave a half-built project and rewritten presets behind.
-    local prefix = pa_command_prefix(bed, opts.pa_command)
+    local prefix, cmd_source = pa_command_prefix(bed, opts.pa_command)
 
     local print_cfg = bed:print_presets()
 
@@ -296,6 +308,14 @@ function execute(opts)
         "PA tower: %d levels, %.4f to %.4f step %.4f, %d layers at %.3f mm, command '%s'",
         num_levels, start_pa, start_pa + (num_levels - 1) * step, step,
         total_layers, layer_height, prefix)
+    summary = summary .. string.format(" (from %s)", cmd_source)
+    if cmd_source == "default" then
+        summary = summary .. "  [WARNING: neither printer_notes nor printer_model"
+                          .. " identified this printer, so M900 K was assumed. If your"
+                          .. " firmware takes M572 or Klipper, set the PA command"
+                          .. " parameter -- otherwise the tower prints but calibrates"
+                          .. " nothing.]"
+    end
     if #notes > 0 then
         summary = summary .. "  [adjusted: " .. table.concat(notes, "; ") .. "]"
     end

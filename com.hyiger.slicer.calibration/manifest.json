@@ -3,7 +3,7 @@
 	"name": "Filament Edition calibration",
 	"license": "AGPL-3.0-only",
 	"min_slicer_version": "3.0.0",
-	"version": "0.4.0",
+	"version": "0.4.1",
 	"author": "hyiger",
 	"description": "Calibration patterns ported from the PrusaSlicer Filament Edition fork",
 	"repo": "https://github.com/hyiger/PrusaSlicer",
