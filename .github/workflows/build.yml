@@ -128,7 +128,10 @@ jobs:
 
       - uses: actions/upload-artifact@v5
         with:
-          name: ${{ env.BUNDLE }}-${{ steps.meta.outputs.version }}${{ steps.sign.outputs.signed == 'true' && '' || '-unsigned' }}
+          # Both branches must be non-empty: in a GitHub Actions expression an
+          # empty string is falsy, so `cond && '' || '-unsigned'` always yields
+          # '-unsigned' even when cond is true.
+          name: ${{ env.BUNDLE }}-${{ steps.meta.outputs.version }}-${{ steps.sign.outputs.signed == 'true' && 'signed' || 'unsigned' }}
           path: |
             ${{ env.BUNDLE }}.zip
             keys/hyiger.pem
