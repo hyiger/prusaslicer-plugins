@@ -149,14 +149,18 @@ jobs:
           pattern: ${{ env.BUNDLE }}-*
           merge-multiple: true
 
-      - name: Refuse to publish an unsigned release
+      # CI never publishes an unsigned bundle: recipients could not import it.
+      # Without the secret this is a no-op rather than a failure, because a
+      # release may legitimately have been signed and published from a
+      # workstation instead -- see PACKAGING.md.
+      - name: Note that signing is unavailable
         if: needs.build.outputs.signed != 'true'
         run: |
-          echo "::error::PLUGIN_SIGNING_KEY is not configured, so this build is unsigned."
-          echo "A tagged release must be signed or recipients cannot import it."
-          exit 1
+          echo "::warning::PLUGIN_SIGNING_KEY is not configured, so this tag was not"
+          echo "published by CI. Publish it from a workstation, or set the secret."
 
       - name: Publish release
+        if: needs.build.outputs.signed == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
